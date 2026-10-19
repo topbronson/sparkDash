@@ -311,6 +311,7 @@ export function SparkPage({
             <Item order={7}>
               <StoragePanel
                 storage={metrics.storage}
+                smart={metrics.smart}
                 sparkId={spark.id}
                 disabledDevices={disabledDevices}
                 onDisabledChange={setDisabledDevices}

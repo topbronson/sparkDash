@@ -324,6 +324,25 @@ export interface RamMetrics {
 }
 
 // ─── Storage metrics ─────────────────────────────────────
+export interface SmartDrive {
+  device: string;
+  kind: "sata" | "nvme";
+  model: string | null;
+  serial: string | null;
+  capacityBytes: number | null;
+  rpm: number | null;
+  tempC: number | null;
+  smartPassed: boolean | null;
+  powerOnHours: number | null;
+  powerCycleCount: number | null;
+  reallocatedSectors: number | null;
+  pendingSectors: number | null;
+  uncorrectedSectors: number | null;
+  /** NVMe-only fields */
+  availableSparePct?: number | null;
+  percentageUsed?: number | null;
+}
+
 export interface RaidArray {
   /** md array name, e.g. "md1" */
   name: string;
@@ -646,6 +665,8 @@ export interface SparkMetrics {
   cpu: CpuMetrics | null;
   ram: RamMetrics | null;
   storage: StorageMetrics[];
+  /** Per-drive SMART health when the host exposes it (remote Linux + provisioned sudoers). */
+  smart?: SmartDrive[];
   network: NetworkMetrics | null;
   /** RoCE / RDMA ports; null when the unit has no RDMA devices. */
   roce?: RoceMetrics | null;

@@ -313,6 +313,11 @@ PY`;
 const REMOTE_IO_MARKER = "---sparkdash-block-io---";
 const REMOTE_DM_MAP_MARKER = "---sparkdash-dm-map---";
 const REMOTE_MDSTAT_MARKER = "---sparkdash-mdstat---";
+const SMART_DRIVE_MARKER = "---sparkdash-drive---";
+// DSM ships smartctl in /usr/bin and (7.4) an nvme-cli; both need a pinned sudoers rule.
+const SMARTCTL_PATH = "/usr/bin/smartctl";
+const NVME_CLI_PATH = "/usr/sbin/nvme";
+const SMART_DRIVES_TTL_MS = 5 * 60 * 1000;
 /** Samples of one disk closer together than this (ms) are the same poll and share one rate. */
 const DISK_RATE_MIN_WINDOW_MS = 250;
 
@@ -531,6 +536,166 @@ export class SystemCollector {
       console.error(`[SystemCollector] Storage error for ${this.spark.id}:`, err.message);
       return [];
     }
+  }
+
+  /**
+   * Per-drive SMART health (remote Linux only, e.g. Synology NAS bays). Rides the storage
+   * tick but throttles itself (SMART scans are heavy); returns undefined when the host has
+   * no SMART path (local unit, Windows/Mac, or sudo not provisioned) so no card renders.
+   * Requires a pinned sudoers rule for the exact smartctl/nvme invocations below.
+   */
+  async collectDrives(now = Date.now()) {
+    if (this.spark.isLocal || this.isWindows || this.isMac) return undefined;
+    if (this._drivesUnavailable) return undefined;
+    // Never block the storage tick on a SMART scan: serve the last good list and, once the
+    // 5-min TTL lapses, kick a background refresh. Absence (undefined) hides the card.
+    if (!this._drives || now - this._drivesAt >= SMART_DRIVES_TTL_MS) {
+      if (!this._drivesRefreshing) {
+        this._drivesRefreshing = true;
+        this._refreshDrives(now).finally(() => {
+          this._drivesRefreshing = false;
+        });
+      }
+    }
+    return this._drives;
+  }
+
+  async _refreshDrives(now) {
+    try {
+      const parts = await this._getRemoteSmartctl();
+      if (parts === null) {
+        // No smartctl binary at all: stay silent permanently, don't poll-probe forever.
+        this._drivesUnavailable = true;
+        return undefined;
+      }
+      const drives = [];
+      let sawPermissionDenied = false;
+      for (const [name, text] of parts) {
+        if (/sudo:|a password is required|Permission denied|cannot open/i.test(text) && !/=== START/i.test(text)) {
+          sawPermissionDenied = true;
+          continue;
+        }
+        const d = name.startsWith("nvme") ? this._parseNvmeSmartLog(text, name) : this._parseSmartctlText(text, name);
+        if (d) drives.push(d);
+      }
+      if (this._drives && drives.length === 0) return this._drives; // transient wipe guard
+      if (drives.length === 0 && sawPermissionDenied && !this._drives) {
+        // sudo not provisioned: back off hard (retry after TTL) instead of spamming.
+        this._drivesAt = now;
+        return undefined;
+      }
+      this._drives = drives;
+      this._drivesAt = now;
+      return drives;
+    } catch (err) {
+      console.error(`[SystemCollector] Drives SMART error for ${this.spark.id}:`, err.message);
+      return this._drives; // keep last known good
+    }
+  }
+
+  /** One SSH round trip: smartctl text per SATA bay + nvme-cli smart-log for the cache disk. */
+  async _getRemoteSmartctl() {
+    const blocks = await sshExec(this.spark, "ls /sys/block/ 2>/dev/null || true").catch(() => "");
+    const satas = String(blocks)
+      .split("\n")
+      .map((s) => s.trim())
+      .filter((s) => /^sata\d+$/.test(s));
+    const hasNvme = /\bnvme\d+n1\b/.test(String(blocks));
+    if (!satas.length && !hasNvme) return null;
+    const segs = satas.map(
+      (d) => `echo ${SMART_DRIVE_MARKER} ${d}; sudo -n ${SMARTCTL_PATH} -i -A /dev/${d} 2>&1`
+    );
+    if (hasNvme)
+      segs.push(
+        `echo ${SMART_DRIVE_MARKER} nvme0n1; sudo -n ${NVME_CLI_PATH} smart-log /dev/nvme0n1 2>&1; sudo -n ${NVME_CLI_PATH} id-ctrl /dev/nvme0n1 2>&1`
+      );
+    const out = await sshExec(this.spark, segs.join("; ") + "; true", { timeoutMs: 30000 });
+    const parts = [];
+    let cur = null;
+    for (const line of String(out).split("\n")) {
+      const m = line.match(new RegExp(`^${SMART_DRIVE_MARKER} (\\S+)$`));
+      if (m) {
+        cur = [m[1], ""];
+        parts.push(cur);
+      } else if (cur) {
+        cur[1] += line + "\n";
+      } else if (parts.length && parts[parts.length - 1][0].startsWith("nvme")) {
+        // trailing sysfs model/serial lines (no header) belong to the nvme segment
+        parts[parts.length - 1][1] += line + "\n";
+      }
+    }
+    return parts.length ? parts : null;
+  }
+
+  /** smartctl (pre-JSON, DSM 6.5-era) `-i -A` text -> drive health record. */
+  _parseSmartctlText(text, device) {
+    if (!/smartctl|SMART/i.test(text)) return null;
+    const grab = (re) => (text.match(re) || [])[1]?.trim();
+    const model = grab(/^Device Model:\s+(.+)$/m) || grab(/^Model Number:\s+(.+)$/m);
+    if (!model && !/SMART overall/i.test(text)) return null;
+    const attr = (name) => {
+      const line = text.match(new RegExp(`^\\s*\\d+\\s+${name}\\b.*$`, "m"));
+      if (!line) return null;
+      const raw = line[0].split("-").pop().trim();
+      const num = parseInt(raw, 10);
+      return Number.isFinite(num) ? num : null;
+    };
+    const tempLine = text.match(/^\s*\d+\s+Temperature_Celsius\b.*\s-\s+(\d+)/m);
+    const cap = grab(/^User Capacity:\s+([\d,]+)\s+bytes/m);
+    return {
+      device,
+      kind: "sata",
+      model: model || null,
+      serial: grab(/^Serial Number:\s+(.+)$/m) || null,
+      capacityBytes: cap ? parseInt(cap.replace(/,/g, ""), 10) : null,
+      rpm: (grab(/^Rotation Rate:\s+(\d+)/m) || null) && parseInt(grab(/^Rotation Rate:\s+(\d+)/m), 10),
+      tempC: tempLine ? parseInt(tempLine[1], 10) : null,
+      smartPassed: /SMART overall-health self-assessment test result:\s*PASSED/i.test(text)
+        ? true
+        : /SMART overall-health.*FAIL/i.test(text)
+          ? false
+          : null,
+      powerOnHours: attr("Power_On_Hours"),
+      powerCycleCount: attr("Power_Cycle_Count"),
+      reallocatedSectors: attr("Reallocated_Sector_Ct"),
+      pendingSectors: attr("Current_Pending_Sector"),
+      uncorrectedSectors: attr("Reported_Uncorrect"),
+    };
+  }
+
+  /** nvme-cli `smart-log` text -> drive health record (sysfs model/serial ride along). */
+  _parseNvmeSmartLog(text, device) {
+    if (!/Smart Log for NVMe|critical_warning/i.test(text)) return null;
+    const grab = (re) => (text.match(re) || [])[1]?.trim();
+    const lines = text.split("\n").map((l) => l.trim());
+    const model = lines.find((l) => /^[A-Z].*[A-Z0-9]$/.test(l) && /SAMSUNG|INTEL|WD|CRUCIAL|SEAGATE|TOSHIBA|KIOXIA|Micron|SOLIDIGM|Kingston|Sabrent/i.test(l)) || null;
+    const sysSerial = lines.find((l) => /^[A-Z0-9]{8,}$/.test(l) && !/^\d+$/.test(l) && !model?.includes(l)) || null;
+    const num = (re) => {
+      const v = grab(re);
+      const n = v ? parseInt(v.replace(/,/g, ""), 10) : null;
+      return Number.isFinite(n) ? n : null;
+    };
+    // NOTE: capture groups in the regexes below must allow thousands separators ([\d,]+).
+    return {
+      device,
+      kind: "nvme",
+      model: grab(/^mn\s*:\s*(.+)$/im) || model,
+      serial: grab(/^sn\s*:\s*(\S+)/im) || grab(/^Serial Number\s*:\s*(\S+)/im) || sysSerial,
+      capacityBytes: null,
+      rpm: null,
+      tempC: num(/^temperature\s*:\s*([\d,]+)/im),
+      smartPassed: (() => {
+        const cw = grab(/^critical_warning\s*:\s*(\S+)/im);
+        return cw === null ? null : parseInt(cw, 16 || 10) === 0;
+      })(),
+      powerOnHours: num(/^power_on_hours\s*:\s*([\d,]+)/im),
+      powerCycleCount: num(/^unsafe_shutdowns\s*:\s*([\d,]+)/im),
+      reallocatedSectors: num(/(?:Media and Data Integrity Errors|media_errors)\s*:\s*([\d,]+)/im),
+      pendingSectors: null,
+      uncorrectedSectors: null,
+      availableSparePct: num(/^available_spare\s*:\s*([\d,]+)/im),
+      percentageUsed: num(/^percentage_used\s*:\s*([\d,]+)/im),
+    };
   }
 
   /** Collect network metrics (interfaces, speeds). */
