@@ -1499,7 +1499,7 @@ export class SystemCollector {
     const lines = output.trim().split("\n").filter(Boolean);
     const disks = [];
     const disabledDevices = this.spark.disabledDevices || [];
-    const PSEUDO = new Set(["tmpfs", "devtmpfs", "proc", "sysfs", "efivarfs", "squashfs", "overlay", "devpts", "cgroup", "cgroup2"]);
+    const PSEUDO = new Set(["tmpfs", "devtmpfs", "proc", "sysfs", "efivarfs", "squashfs", "overlay", "devpts", "cgroup", "cgroup2", "swap"]);
 
     for (const line of lines) {
       const nameMatch = line.match(/NAME="([^"]*)"/);
@@ -2587,7 +2587,9 @@ export class SystemCollector {
       const cmd = [
         "grep -E 'MemTotal|MemAvailable' /proc/meminfo 2>/dev/null",
         "echo '---'",
-        "nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory --format=csv,noheader,nounits 2>/dev/null",
+        // `|| true`: hosts without nvidia-smi (NAS, iGPU laptops) exit 127, which would
+        // reject the whole exec and drop the meminfo data parsed from the first section.
+        "nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory --format=csv,noheader,nounits 2>/dev/null || true",
       ].join("; ");
 
       const output = await sshExec(this.spark, cmd);
