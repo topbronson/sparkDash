@@ -721,6 +721,7 @@ export class SparkMonitor {
         cpu: this._metrics.cpu,
         ram: this._metrics.ram,
         storage: this._metrics.storage,
+        smart: this._metrics.smart ?? null,
         network: this._metrics.network,
         roce: this._metrics.roce ?? null,
         unifiedMemory: this._metrics.unifiedMemory,
@@ -1085,6 +1086,7 @@ export class SparkMonitor {
     try {
       let result;
       let roce;
+      let drives;
       switch (domain) {
         case "residentModels":
           result = await this.collector.probeResidentModels(); // null = could not tell
@@ -1110,6 +1112,12 @@ export class SparkMonitor {
           break;
         case "storage":
           result = await this.collector.collectStorage();
+          // SMART rides the storage tick: self-throttled (5-min TTL), never fails the poll,
+          // and a wedged SSH can't hold storage hostage (same pattern as RoCE on network).
+          drives = await Promise.race([
+            this.collector.collectDrives().catch(() => undefined),
+            new Promise((resolve) => setTimeout(() => resolve(undefined), 3000).unref?.()),
+          ]);
           break;
         case "memory":
           result = await this.collector.collectUnifiedMemory();
@@ -1176,6 +1184,8 @@ export class SparkMonitor {
           break;
         case "storage":
           this._metrics.storage = result;
+          // undefined = SMART unavailable/unprovisioned on this host: absence hides the card.
+          if (drives !== undefined) this._metrics.smart = drives;
           break;
         case "memory":
           this._metrics.unifiedMemory = result;
@@ -1244,6 +1254,8 @@ export class SparkMonitor {
       const result = await this.collector.collectStorage();
       if (!this._running || this._runGeneration !== runGeneration) return;
       this._metrics.storage = result;
+      const drives = await this.collector.collectDrives().catch(() => undefined);
+      if (drives !== undefined && this._runGeneration === runGeneration) this._metrics.smart = drives;
       this._lastUpdate[domain] = Date.now();
       if (this._domainSucceeded(domain, result)) this._lastSuccess[domain] = this._lastUpdate[domain];
     } catch (err) {

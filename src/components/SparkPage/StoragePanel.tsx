@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { useState, useCallback } from "react";
-import type { StorageMetrics } from "../../api/types";
+import type { StorageMetrics, SmartDrive } from "../../api/types";
 import { updateDisabledDevices, refreshSparkMetric, updateSpark } from "../../api/client";
 import { Panel } from "../ui/Panel";
 import { DiskIcon, GearIcon, RotateIcon } from "../ui/icons";
@@ -8,6 +8,7 @@ import { formatBytesPerSec, formatGb } from "../../shared/formatBytes";
 
 interface StoragePanelProps {
   storage: StorageMetrics[];
+  smart?: SmartDrive[];
   sparkId: string;
   disabledDevices: string[];
   onDisabledChange: (devices: string[]) => void;
@@ -67,6 +68,7 @@ function SettingsButton({
 
 export function StoragePanel({
   storage,
+  smart,
   sparkId,
   disabledDevices,
   onDisabledChange,
@@ -251,6 +253,67 @@ export function StoragePanel({
                         {t("storage.free", { value: formatGb(disk.available) })}
                       </span>
                     </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {smart && smart.length > 0 && (
+            <div className="sp-stack">
+              {smart.map((d) => {
+                const bad =
+                  d.smartPassed === false ||
+                  (d.reallocatedSectors ?? 0) > 0 ||
+                  (d.pendingSectors ?? 0) > 0 ||
+                  (d.uncorrectedSectors ?? 0) > 0;
+                const hot = d.tempC !== null && d.tempC >= 55;
+                const warm = d.tempC !== null && d.tempC >= 48;
+                const capGb = d.capacityBytes ? Math.round(d.capacityBytes / 1e9) : null;
+                return (
+                  <div key={d.device} className="sp-lbl sp-lbl--sub">
+                    <span className="sp-clip mono" title={`${d.model || d.device} · ${d.serial || "no serial"}`}>
+                      <span style={bad ? { color: "#f87171" } : undefined}>
+                        {d.device} {bad ? "✗" : "✓"}
+                      </span>{" "}
+                      <span className="sp-muted">{d.model?.split(" ")[0] || d.kind}</span>
+                    </span>
+                    <span className="mono sp-muted sp-nowrap">
+                      {d.tempC !== null && (
+                        <span style={hot ? { color: "#f87171" } : warm ? { color: "#fbbf24" } : undefined}>
+                          {d.tempC}°C
+                        </span>
+                      )}
+                      {capGb !== null && (
+                        <>
+                          <span className="sp-sep">·</span>
+                          {capGb}GB
+                        </>
+                      )}
+                      {d.powerOnHours !== null && (
+                        <>
+                          <span className="sp-sep">·</span>
+                          {(d.powerOnHours / 8760).toFixed(1)}y
+                        </>
+                      )}
+                      {(d.reallocatedSectors ?? 0) > 0 && (
+                        <>
+                          <span className="sp-sep">·</span>
+                          <span style={{ color: "#f87171" }}>reall {d.reallocatedSectors}</span>
+                        </>
+                      )}
+                      {(d.pendingSectors ?? 0) > 0 && (
+                        <>
+                          <span className="sp-sep">·</span>
+                          <span style={{ color: "#f87171" }}>pend {d.pendingSectors}</span>
+                        </>
+                      )}
+                      {d.percentageUsed != null && (
+                        <>
+                          <span className="sp-sep">·</span>
+                          used {d.percentageUsed}%
+                        </>
+                      )}
+                    </span>
                   </div>
                 );
               })}
