@@ -368,6 +368,16 @@ export interface RamMetrics {
 }
 
 // ─── Storage metrics ─────────────────────────────────────
+export interface RaidArray {
+  /** md array name, e.g. "md1" */
+  name: string;
+  level: string;
+  state: "ok" | "degraded";
+  rebuilding: boolean;
+  /** parent block devices participating, e.g. ["sata1","sata2"] */
+  members: string[];
+}
+
 export interface StorageMetrics {
   device: string;
   label: string;
@@ -379,6 +389,8 @@ export interface StorageMetrics {
   writeSpeed: number;
   /** Present when device is in disabledDevices; still returned for Settings UI */
   disabled?: boolean;
+  /** mdraid arrays backing this mount (from /proc/mdstat); absent on non-RAID hosts */
+  raid?: RaidArray[];
 }
 
 // ─── Network metrics ─────────────────────────────────────
