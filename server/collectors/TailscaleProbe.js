@@ -105,7 +105,11 @@ export class TailscaleProbe {
    * @returns {Promise<object>}
    */
   async probe() {
-    const cmd = "tailscale status --json";
+    // Non-login SSH shells (Synology DSM packages, mise-managed installs)
+    // often lack the tailscale binary on PATH. Bootstrap the known package
+    // locations explicitly instead of relying on shell rc files.
+    const cmd =
+      'export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin:/var/packages/Tailscale/target/bin:$PATH"; tailscale status --json';
     let out;
     try {
       out = this.spark?.isLocal
