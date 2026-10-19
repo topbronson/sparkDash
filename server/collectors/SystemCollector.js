@@ -544,6 +544,11 @@ export class SystemCollector {
    * no SMART path (local unit, Windows/Mac, or sudo not provisioned) so no card renders.
    * Requires a pinned sudoers rule for the exact smartctl/nvme invocations below.
    */
+  /** Wall time of the last successful SMART sampling; 0 when never sampled. */
+  drivesSampledAt() {
+    return this._drivesAt || 0;
+  }
+
   async collectDrives(now = Date.now()) {
     if (this.spark.isLocal || this.isWindows || this.isMac) return undefined;
     if (this._drivesUnavailable) return undefined;

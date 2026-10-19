@@ -11,6 +11,7 @@ import { TailscaleProbe } from "../collectors/TailscaleProbe.js";
 import { llmDaily } from "../collectors/LlmDaily.js";
 import { HealthEvaluator } from "../health/HealthEvaluator.js";
 import { sshExec } from "../collectors/ssh.js";
+import { driveHistory } from "../metrics/DriveHistory.js";
 
 /** macOS uptime in seconds from `kern.boottime` (`{ sec = 1791857261, usec = ... } ...`). */
 export const DARWIN_UPTIME_CMD =
@@ -753,6 +754,22 @@ export class SparkMonitor {
     );
   }
 
+  /** Store a SMART drive reading and append it to the long-horizon history.
+   * Samples are stamped with the collector's actual sample time, not the
+   * record time, so a stale last-known-good array re-served during an SSH
+   * outage can never fabricate "drive was fine today" points. */
+  _recordDrives(drives) {
+    if (drives === undefined) return;
+    this._metrics.smart = drives;
+    try {
+      const sampleAt = this.collector?.drivesSampledAt?.() || Date.now();
+      driveHistory.record(this.spark.id, drives, sampleAt);
+    } catch (err) {
+      // History is best-effort; never let it break the storage tick.
+      console.error(`[SparkMonitor] ${this.spark.id} drive history record error:`, err.message);
+    }
+  }
+
   /** Re-run the health rules, emit events for changes (never for the first baseline). */
   _updateHealth(domain = "other") {
     try {
@@ -1129,7 +1146,7 @@ export class SparkMonitor {
         case "storage":
           this._metrics.storage = result;
           // undefined = SMART unavailable/unprovisioned on this host: absence hides the card.
-          if (drives !== undefined) this._metrics.smart = drives;
+          this._recordDrives(drives);
           break;
         case "memory":
           this._metrics.unifiedMemory = result;
@@ -1189,7 +1206,7 @@ export class SparkMonitor {
       if (!this._running || this._runGeneration !== runGeneration) return;
       this._metrics.storage = result;
       const drives = await this.collector.collectDrives().catch(() => undefined);
-      if (drives !== undefined && this._runGeneration === runGeneration) this._metrics.smart = drives;
+      if (this._runGeneration === runGeneration) this._recordDrives(drives);
       this._lastUpdate[domain] = Date.now();
       if (this._domainSucceeded(domain, result)) this._lastSuccess[domain] = this._lastUpdate[domain];
     } catch (err) {

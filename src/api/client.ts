@@ -20,6 +20,7 @@ import type {
   MonthlyEnergy,
   TokenHistory,
   DecodeBenchJob,
+  DriveHistoryMap,
   DecodeBenchListResponse,
   FleetEnergy,
   HealthResponse,
@@ -853,6 +854,13 @@ export interface GpuHistoryResponse {
 
 export function getGpuHistory(sparkId: string, windowMs: number): Promise<GpuHistoryResponse> {
   return apiFetch<GpuHistoryResponse>(`/api/sparks/${encodeURIComponent(sparkId)}/gpu-history?windowMs=${Math.round(windowMs)}`);
+}
+
+/** Long-horizon per-drive SMART trend (empty object when nothing recorded yet). */
+export function getDriveHistory(sparkId: string): Promise<DriveHistoryMap> {
+  return apiFetch<{ devices: DriveHistoryMap }>(`/api/sparks/${encodeURIComponent(sparkId)}/drive-history`).then(
+    (r) => r.devices ?? {}
+  );
 }
 
 // ─── Security scans (VulnHunter) ─────────────────────────

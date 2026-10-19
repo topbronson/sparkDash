@@ -343,6 +343,25 @@ export interface SmartDrive {
   percentageUsed?: number | null;
 }
 
+/**
+ * One long-horizon SMART trend point (server DriveHistory): change-driven
+ * samples plus a daily heartbeat. Absent keys mean the field never moved /
+ * did not exist on this drive kind.
+ */
+export interface SmartSample {
+  t: number;
+  pending?: number;
+  realloc?: number;
+  uncorrected?: number;
+  tempC?: number;
+  powerOnHours?: number;
+  availableSparePct?: number;
+  percentageUsed?: number;
+}
+
+/** device -> samples, oldest first */
+export type DriveHistoryMap = Record<string, SmartSample[]>;
+
 export interface RaidArray {
   /** md array name, e.g. "md1" */
   name: string;

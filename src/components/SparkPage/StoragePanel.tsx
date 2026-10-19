@@ -1,7 +1,8 @@
-import { useState, useCallback } from "react";
-import type { StorageMetrics, SmartDrive } from "../../api/types";
-import { updateDisabledDevices, refreshSparkMetric, updateSpark } from "../../api/client";
+import { useState, useCallback, useEffect } from "react";
+import type { StorageMetrics, SmartDrive, DriveHistoryMap } from "../../api/types";
+import { updateDisabledDevices, refreshSparkMetric, updateSpark, getDriveHistory } from "../../api/client";
 import { Panel } from "../ui/Panel";
+import { Sparkline } from "../ui/Sparkline";
 import { DiskIcon, GearIcon, RotateIcon } from "../ui/icons";
 import { formatBytesPerSec, formatGb } from "../../shared/formatBytes";
 
@@ -76,6 +77,23 @@ export function StoragePanel({
   const [showSettings, setShowSettings] = useState(false);
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  // Long-horizon SMART trend for the drive strip (fetched once per spark visit).
+  const [driveHist, setDriveHist] = useState<DriveHistoryMap | null>(null);
+  const driveCount = smart?.length ?? 0;
+  useEffect(() => {
+    if (!sparkId || driveCount === 0) return;
+    let on = true;
+    getDriveHistory(sparkId)
+      .then((h) => {
+        if (on) setDriveHist(h);
+      })
+      .catch(() => {
+        /* no history endpoint / empty: strip renders without trend */
+      });
+    return () => {
+      on = false;
+    };
+  }, [sparkId, driveCount]);
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -310,6 +328,53 @@ export function StoragePanel({
                           used {d.percentageUsed}%
                         </>
                       )}
+                      {(() => {
+                        const hist = driveHist?.[d.device];
+                        if (!hist || hist.length < 2) return null;
+                        // Pick ONE field per drive (first that exists anywhere), so a
+                        // series never mixes units and missing points are gaps, not zeros.
+                        const field =
+                          d.kind === "nvme"
+                            ? hist.some((s) => s.availableSparePct != null)
+                              ? "availableSparePct"
+                              : hist.some((s) => s.tempC != null)
+                                ? "tempC"
+                                : null
+                            : hist.some((s) => s.pending != null)
+                              ? "pending"
+                              : hist.some((s) => s.realloc != null)
+                                ? "realloc"
+                                : null;
+                        if (!field) return null;
+                        const series = hist
+                          .map((s) => s[field])
+                          .filter((v): v is number => typeof v === "number");
+                        if (series.length < 2) return null;
+                        const mn = Math.min(...series);
+                        const mx = Math.max(...series);
+                        const label =
+                          field === "availableSparePct"
+                            ? `spare ${mn}–${mx}%`
+                            : field === "tempC"
+                              ? `${mn}–${mx}°C`
+                              : `pend ${mn}–${mx}`;
+                        return (
+                          <>
+                            <span className="sp-sep">·</span>
+                            <span
+                              title={`${series.length} samples · ${label}`}
+                              style={{ verticalAlign: "middle" }}
+                            >
+                              <Sparkline
+                                data={series}
+                                width={64}
+                                height={16}
+                                color={bad ? "#f87171" : "var(--color-accent)"}
+                              />
+                            </span>
+                          </>
+                        );
+                      })()}
                     </span>
                   </div>
                 );
