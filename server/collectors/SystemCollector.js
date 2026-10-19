@@ -311,6 +311,8 @@ PY`;
 
 /** Separates `df` output from the block-device counters in the remote storage command. */
 const REMOTE_IO_MARKER = "---sparkdash-block-io---";
+const REMOTE_DM_MAP_MARKER = "---sparkdash-dm-map---";
+const REMOTE_MDSTAT_MARKER = "---sparkdash-mdstat---";
 /** Samples of one disk closer together than this (ms) are the same poll and share one rate. */
 const DISK_RATE_MIN_WINDOW_MS = 250;
 
@@ -2130,10 +2132,16 @@ export class SystemCollector {
     try {
       // Include root (/); exclude pseudo filesystems via -x and type filter. The block devices'
       // cumulative sector counters ride in the same round trip, after a marker line.
+      // DM_MAP/MDSTAT ride too: Synology volumes mount as LVM-ish "cachedev_*" names that have
+      // no /sys/block entry, so IO attribution must walk dm slaves down to md/sd leaves, and
+      // RAID health comes free from /proc/mdstat in the same SSH round trip.
       const cmd =
         "df -l -B1 -T -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs -x proc -x sysfs -x devpts -x cgroup -x cgroup2 2>/dev/null; " +
         `echo ${REMOTE_IO_MARKER}; ` +
-        'for d in /sys/block/*; do echo "${d##*/} $(cat "$d/stat" 2>/dev/null)"; done 2>/dev/null';
+        'for d in /sys/block/*; do echo "${d##*/} $(cat "$d/stat" 2>/dev/null)"; done 2>/dev/null; ' +
+        `echo ${REMOTE_DM_MAP_MARKER}; ` +
+        'for d in /sys/block/dm-*; do echo "$(basename $d) $(cat "$d/dm/name" 2>/dev/null) $(ls "$d/slaves" 2>/dev/null | tr "\\n" ",")"; done 2>/dev/null; ' +
+        `echo ${REMOTE_MDSTAT_MARKER}; cat /proc/mdstat 2>/dev/null`;
       const output = await sshExec(this.spark, cmd);
       return this._parseRemoteStorage(output);
     } catch (err) {
@@ -2142,9 +2150,99 @@ export class SystemCollector {
     }
   }
 
+  /**
+   * mdstat text -> [{ name, level, state: "ok"|"degraded", rebuilding, members }]
+   * Kernel format spans two lines per array:
+   *   md1 : active raid1 sata1p2[0] sata2p2[1]
+   *         195334464 blocks [2/2] [UU]
+   *   (optional) [==============>..........]  resync = 42.3% ...
+   * The [n/m] count and [UU] bitmap on the blocks line are authoritative.
+   */
+  _parseMdstat(text) {
+    const arrays = [];
+    let current = null;
+    for (const line of String(text || "").split("\n")) {
+      const header = line.match(/^md(\S+)\s*:\s*(?:active|inactive)\s+(raid\d|linear|multipath)\s+(.*)/);
+      if (header) {
+        const [, name, level, rest] = header;
+        const members = [];
+        for (const tok of rest.split(/\s+/)) {
+          const mm = tok.match(/^([a-z0-9]+)\[(\d+)\]/i);
+          if (!mm) continue;
+          const parent = this._blockParentDevice(mm[1]);
+          if (!members.includes(parent)) members.push(parent);
+        }
+        current = { name: `md${name}`, level, state: "ok", rebuilding: false, members };
+        arrays.push(current);
+        continue;
+      }
+      if (!current) continue;
+      const blocks = line.match(/blocks\s+\[(\d+)\/(\d+)\]\s*\[([U_]+)\]/);
+      if (blocks) {
+        const [, expected, present, bitmap] = blocks;
+        current.state = Number(present) >= Number(expected) && !bitmap.includes("_") ? "ok" : "degraded";
+        continue;
+      }
+      if (/\b(resync|recovery)\s*=/.test(line) && !/\bslow\b/.test(line)) current.rebuilding = true;
+    }
+    return arrays;
+  }
+
+  /**
+   * Resolve a mounted device name to the counter keys whose sector stats represent it.
+   * Fast path: exact /sys/block name, then classic partition-parent. Otherwise walk
+   * device-mapper (cachedev_* -> dm-N -> slaves ...) down to nodes that DO have counters.
+   */
+  _resolveIoDevices(device, counters, dmByName, dmSlaves) {
+    const start = this._blockParentDevice(device);
+    if (counters.has(device)) return [device];
+    if (counters.has(start)) return [start];
+    const out = [];
+    const seen = new Set();
+    const queue = [device];
+    while (queue.length && out.length < 32) {
+      const node = queue.shift();
+      if (seen.has(node)) continue;
+      seen.add(node);
+      const base = !dmSlaves.has(node) && dmByName.has(node) ? dmByName.get(node) : node;
+      if (counters.has(base) && !dmByName.has(base)) {
+        out.push(base);
+        continue;
+      }
+      const slaves = dmSlaves.get(base);
+      if (slaves && slaves.length) queue.push(...slaves);
+      else if (counters.has(base)) out.push(base);
+    }
+    return out.length ? out : [start];
+  }
+
+  /**
+   * md arrays backing a mounted device: walk dm slaves all the way down (unlike IO leaves,
+   * which stop at the first counter-bearing node) and keep every md array encountered.
+   */
+  _resolveRaidArrays(device, dmByName, dmSlaves, mdArrays) {
+    const names = new Set();
+    if (/^md\d+$/.test(device)) names.add(device);
+    const seen = new Set();
+    const queue = [device];
+    while (queue.length && names.size < 32) {
+      const node = queue.shift();
+      if (seen.has(node)) continue;
+      seen.add(node);
+      const base = !dmSlaves.has(node) && dmByName.has(node) ? dmByName.get(node) : node;
+      if (/^md\d+$/.test(base)) names.add(base);
+      const slaves = dmSlaves.get(base);
+      if (slaves && slaves.length) queue.push(...slaves);
+    }
+    return mdArrays.filter((a) => names.has(a.name));
+  }
+
   /** Disks from `df` output, with read/write speed from the block-device counters that follow it. */
   _parseRemoteStorage(output, now = Date.now()) {
-    const [dfText, ioText = ""] = String(output).split(REMOTE_IO_MARKER);
+    const [dfText, ioText = "", dmText = "", mdText = ""] = String(output)
+      .split(REMOTE_IO_MARKER)
+      .flatMap((s, i) => (i === 0 ? [s] : s.split(REMOTE_DM_MAP_MARKER)))
+      .flatMap((s, i) => (i === 0 ? [s] : s.split(REMOTE_MDSTAT_MARKER)));
     const counters = new Map();
     for (const line of ioText.split("\n")) {
       const f = line.trim().split(/\s+/);
@@ -2153,6 +2251,17 @@ export class SystemCollector {
         counters.set(f[0], { read: parseInt(f[3], 10), written: parseInt(f[7], 10) });
       }
     }
+    // device-mapper map: "dm-7 cachedev_1 md4,md2,..." -> name lookups + slave graph
+    const dmByName = new Map();
+    const dmSlaves = new Map();
+    for (const line of dmText.split("\n")) {
+      const f = line.trim().split(/\s+/);
+      if (f.length < 3 || !/^dm-\d+$/.test(f[0])) continue;
+      const [dm, mapperName, slaveCsv] = f;
+      if (mapperName) dmByName.set(mapperName, dm);
+      dmSlaves.set(dm, (slaveCsv || "").split(",").filter(Boolean));
+    }
+    const mdArrays = this._parseMdstat(mdText);
     const lines = dfText.trim().split("\n").slice(1); // Skip header
     const disks = [];
     const disabledDevices = this.spark.disabledDevices || [];
@@ -2168,6 +2277,9 @@ export class SystemCollector {
       "cgroup",
       "cgroup2",
     ]);
+    // Same filesystem mounted at several paths (Synology btrfs subvolumes re-list the
+    // volume under @appdata shares, etc.) should render once: keep the shortest label.
+    const dedupe = new Map();
 
     for (const line of lines) {
       const parts = line.split(/\s+/);
@@ -2178,14 +2290,28 @@ export class SystemCollector {
       if (PSEUDO.has((type || "").toLowerCase())) continue;
 
       const device = fsys.split("/").pop() || fsys;
+      if (/^loop\d+$/.test(device)) continue;
       const isDisabled = disabledDevices.includes(device) || disabledDevices.includes(mount);
 
-      const parent = this._blockParentDevice(device);
-      const c = counters.get(parent);
+      const ioDevices = this._resolveIoDevices(device, counters, dmByName, dmSlaves);
       let io = { readSpeed: 0, writeSpeed: 0 };
-      if (c) io = this._diskRate(parent, c.read, c.written, now);
+      if (ioDevices.length) {
+        // Sum leaf rates; _diskRate shares one sample across mounts in the same poll.
+        let readSpeed = 0;
+        let writeSpeed = 0;
+        for (const dev of ioDevices) {
+          const c = counters.get(dev);
+          if (!c) continue;
+          const r = this._diskRate(dev, c.read, c.written, now);
+          readSpeed += r.readSpeed;
+          writeSpeed += r.writeSpeed;
+        }
+        io = { readSpeed, writeSpeed };
+      }
 
-      disks.push({
+      const raid = mdArrays.length ? this._resolveRaidArrays(device, dmByName, dmSlaves, mdArrays) : undefined;
+
+      const entry = {
         device,
         label: mount,
         used: Math.round(parseInt(used) / 1024 / 1024),
@@ -2195,10 +2321,14 @@ export class SystemCollector {
         readSpeed: io.readSpeed,
         writeSpeed: io.writeSpeed,
         disabled: isDisabled,
-      });
+        ...(raid && raid.length ? { raid } : {}),
+      };
+      const key = `${device}|${size}|${used}`;
+      const prev = dedupe.get(key);
+      if (!prev || entry.label.length < prev.label.length) dedupe.set(key, entry);
     }
 
-    return disks;
+    return [...dedupe.values()];
   }
 
   /**

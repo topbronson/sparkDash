@@ -110,6 +110,13 @@ export function StoragePanel({
   const totalRead = visibleDisks.reduce((a, d) => a + (d.readSpeed || 0), 0);
   const totalWrite = visibleDisks.reduce((a, d) => a + (d.writeSpeed || 0), 0);
 
+  // mdraid health summary (data-station / any md host): union of arrays behind visible disks.
+  const raidArrays = new Map<string, NonNullable<(typeof visibleDisks)[number]["raid"]>[number]>();
+  for (const d of visibleDisks) for (const a of d.raid || []) raidArrays.set(a.name, a);
+  const raidList = [...raidArrays.values()];
+  const raidBad = raidList.filter((a) => a.state !== "ok");
+  const raidBusy = raidList.filter((a) => a.rebuilding);
+
   return (
     <Panel
       title="Storage"
@@ -121,6 +128,17 @@ export function StoragePanel({
           {!showSettings && visibleDisks.length > 0 && (
             <span className="mono sp-muted sp-nowrap sp-actions__lead" title="Combined disk throughput">
               r {formatBytesPerSec(totalRead)} · w {formatBytesPerSec(totalWrite)}
+            </span>
+          )}
+          {!showSettings && raidList.length > 0 && (
+            <span
+              className="mono sp-nowrap sp-muted"
+              title={raidList.map((a) => `${a.name} ${a.level}: ${a.members.join(",")} ${a.state}${a.rebuilding ? " (resync)" : ""}`).join("\n")}
+              style={raidBad.length ? { color: "#f87171" } : undefined}
+            >
+              {raidBad.length
+                ? `RAID degraded: ${raidBad.map((a) => a.name).join(", ")}`
+                : `RAID ${raidList.map((a) => a.name).join(",")}${raidBusy.length ? " · resync" : ""} ✓`}
             </span>
           )}
           <button
@@ -211,7 +229,24 @@ export function StoragePanel({
                         <span className="sp-sep">·</span>
                         <span className="text-accent">↓</span> {formatBytesPerSec(disk.readSpeed || 0)}
                       </span>
-                      <span className="mono">{formatGb(disk.available)} free</span>
+                      <span className="mono">
+                        {disk.raid && disk.raid.length > 0 && (
+                          <>
+                            {disk.raid.map((a) => (
+                              <span
+                                key={a.name}
+                                title={`${a.name} ${a.level}: ${a.members.join(",")} ${a.state}`}
+                                style={a.state !== "ok" ? { color: "#f87171" } : undefined}
+                              >
+                                {a.name}
+                                {a.state !== "ok" ? " ✗" : a.rebuilding ? "↻" : ""}{" "}
+                              </span>
+                            ))}
+                            <span className="sp-sep">·</span>
+                          </>
+                        )}
+                        {formatGb(disk.available)} free
+                      </span>
                     </div>
                   </div>
                 );
