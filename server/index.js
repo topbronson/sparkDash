@@ -69,6 +69,7 @@ import { createAlertsRuntime, registerAlertRoutes } from "./alerts/runtime.js";
 import { FleetEnergyTracker } from "./energy/FleetEnergyTracker.js";
 import { EventLog } from "./events/EventLog.js";
 import { planListenRetry } from "./listenRetry.js";
+import { driveHistory } from "./metrics/DriveHistory.js";
 import { UnitHistory } from "./metrics/UnitHistory.js";
 import { createUnitHistoryRuntime, registerUnitHistoryRoutes } from "./metrics/UnitHistoryRuntime.js";
 import { LauncherStore } from "./llmlaunch/LauncherStore.js";
@@ -845,6 +846,33 @@ app.post("/api/sparks/:id/runtime-control/:action", async (req, res) => {
     res.status(result.state === "ready" && result.busy ? 202 : runtimeControlHttpStatus(result)).json(result);
   } catch (err) {
     res.status(503).json({ state: "unavailable", reason: err.message, error: err.message, serving: null, targets: [] });
+  }
+});
+
+// Long-horizon per-drive SMART trend for the Storage panel drive strip
+// (change-driven samples + daily heartbeats, seeded/kept by DriveHistory).
+app.get("/api/sparks/:id/drive-history", (req, res) => {
+  if (!registry.getSpark(req.params.id)) return res.status(404).json({ error: "Spark not found" });
+  res.json({ devices: driveHistory.get(req.params.id) });
+});
+
+// Archive import (scripts/import-syno-smart-history.mjs): merge points through
+// the RUNNING server's singleton instead of writing the JSON out-of-band,
+// which a live debounce flush could silently overwrite. Larger body limit:
+// multi-year weekly archives can exceed the default 100 kb.
+app.post("/api/sparks/:id/drive-history/seed", express.json({ limit: "4mb" }), (req, res) => {
+  if (!registry.getSpark(req.params.id)) return res.status(404).json({ error: "Spark not found" });
+  const { device, samples, force } = req.body || {};
+  if (!device || !Array.isArray(samples)) {
+    return res.status(400).json({ error: "device and samples[] required" });
+  }
+  try {
+    const changed = driveHistory.seed(req.params.id, String(device), samples, { force: Boolean(force) });
+    driveHistory.flush();
+    const count = driveHistory.get(req.params.id)[String(device)]?.length ?? 0;
+    res.json({ ok: true, changed, count });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -2737,6 +2765,11 @@ async function shutdown(signal) {
     llmDaily.flush();
   } catch (err) {
     console.error("[sparkDash] failed to flush LLM daily history:", err.message);
+  }
+  try {
+    driveHistory.flush();
+  } catch (err) {
+    console.error("[sparkDash] failed to flush drive history:", err.message);
   }
   llmTokenRuntime.stop();
   try {

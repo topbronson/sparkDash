@@ -11,6 +11,7 @@ import type {
   MonthlyEnergy,
   TokenHistory,
   DecodeBenchJob,
+  DriveHistoryMap,
   DecodeBenchListResponse,
   FleetEnergy,
   HealthResponse,
@@ -970,6 +971,12 @@ export interface GpuHistoryResponse {
 
 export function getGpuHistory(sparkId: string, windowMs: number): Promise<GpuHistoryResponse> {
   return apiFetch<GpuHistoryResponse>(`/api/sparks/${encodeURIComponent(sparkId)}/gpu-history?windowMs=${Math.round(windowMs)}`);
+}
+
+export function getDriveHistory(sparkId: string): Promise<DriveHistoryMap> {
+  return apiFetch<{ devices: DriveHistoryMap }>(`/api/sparks/${encodeURIComponent(sparkId)}/drive-history`).then(
+    (r) => r.devices ?? {}
+  );
 }
 
 /** The 48 h / 30 d unit history (Settings → Metrics history; `{ enabled: false }` while off). */
