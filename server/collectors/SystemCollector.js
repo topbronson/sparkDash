@@ -2566,7 +2566,7 @@ export class SystemCollector {
         'for d in $(find /sys/block -mindepth 1 -maxdepth 1 2>/dev/null | sort); do echo "${d##*/} $(cat "$d/stat" 2>/dev/null)"; done 2>/dev/null; ' +
         `echo ${REMOTE_DM_MAP_MARKER}; ` +
         'for d in $(find /sys/block -mindepth 1 -maxdepth 1 -name "dm-*" 2>/dev/null | sort); do echo "${d##*/} $(cat "$d/dm/name" 2>/dev/null) $(ls "$d/slaves" 2>/dev/null | tr "\\n" ",")"; done 2>/dev/null; ' +
-        `echo ${REMOTE_MDSTAT_MARKER}; cat /proc/mdstat 2>/dev/null`;
+        `echo ${REMOTE_MDSTAT_MARKER}; cat /proc/mdstat 2>/dev/null || true`;
       const output = await execute(this.spark, cmd);
       return this._parseRemoteStorage(output);
     } catch (err) {
