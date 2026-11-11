@@ -257,6 +257,12 @@ function SparkCardImpl({
     .filter((p) => p.vramMB > 0)
     .slice(0, 3)
     .map((p) => `${shortProcessName(p.name)} (${formatMb(p.vramMB)})`);
+  // "Loading" is a claim, not a vibe: only make it when a monitored endpoint served
+  // recently, so an external start is plausibly booting. A desktop host holding VRAM
+  // (compositor, idle ComfyUI) with no recent model activity is just "GPU is in use".
+  // Xe cards make this worse: the GT idle counter freezes on a parked or display-driven
+  // GT, so reported usage can pin at 100% while intel_gpu_top reads 0%.
+  const recentlyServed = llmList.some((l) => l?.lastActiveAt && Date.now() - l.lastActiveAt < 10 * 60 * 1000);
   const loadingHint =
     !llm && (memUsed >= 2048 || usage >= 10)
       ? gpuHolders.length > 0
@@ -438,7 +444,7 @@ function SparkCardImpl({
               ) : null}
             </div>
           </div>
-          {showLauncher ? <ModelLauncher spark={spark} onOpen={onSelect} busy={loadingHint} busyHolders={gpuHolders.length > 0} freeMb={memTotal > 0 ? memAvail : null} lowFreeMb={HEADROOM_THRESHOLDS_MB[memoryModelFor(spark.kind, spark.platform)].low} /> : null}
+          {showLauncher ? <ModelLauncher spark={spark} onOpen={onSelect} busy={loadingHint} busyHolders={gpuHolders.length > 0} busyMayBeModel={recentlyServed} freeMb={memTotal > 0 ? memAvail : null} lowFreeMb={HEADROOM_THRESHOLDS_MB[memoryModelFor(spark.kind, spark.platform)].low} /> : null}
           {role === "worker" ? (
             <div className="ov-launch ov-launch--worker">
               <div className="eyebrow">{t("card.workerOfLabel")}</div>

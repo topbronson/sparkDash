@@ -25,6 +25,7 @@ export function ModelLauncher({
   onOpen,
   busy = null,
   busyHolders = false,
+  busyMayBeModel = false,
   freeMb = null,
   lowFreeMb = 0,
 }: {
@@ -34,6 +35,8 @@ export function ModelLauncher({
   busy?: string | null;
   /** The busy text names the processes holding the GPU, so it is not a model that is starting. */
   busyHolders?: boolean;
+  /** A monitored model served recently: GPU activity may honestly be a model still loading. Without it the card must not claim "loading". */
+  busyMayBeModel?: boolean;
   /** Free memory in MB; null when unknown. */
   freeMb?: number | null;
   /** Below this much free memory, "Start anyway" asks a second time. */
@@ -142,12 +145,12 @@ export function ModelLauncher({
     body = (
       <>
         <div className="ov-launch__title">
-          {busyHolders ? null : <span className="ov-launch__spin" aria-hidden />}
-          {busyHolders ? t("launcher.gpuInUse") : t("launcher.somethingLoading")}
+          {busyHolders || !busyMayBeModel ? null : <span className="ov-launch__spin" aria-hidden />}
+          {busyHolders || !busyMayBeModel ? t("launcher.gpuInUse") : t("launcher.somethingLoading")}
         </div>
         <div className="ov-launch__hint">
           {busy}.{" "}
-          {busyHolders
+          {busyHolders || !busyMayBeModel
             ? t("launcher.addLlmPort")
             : t("launcher.startCouldRunOut")}
         </div>

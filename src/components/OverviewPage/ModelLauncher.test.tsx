@@ -171,11 +171,19 @@ describe("ModelLauncher", () => {
       expect(container.textContent).not.toContain("Something is loading");
     });
 
-    it("keeps the loading wording when no process is named", async () => {
+    it("keeps the loading wording only when a model may be booting (no process named)", async () => {
       fetchLaunchers.mockResolvedValue(list({ a: "stopped", b: "stopped" }));
-      const { container } = render(<ModelLauncher spark={makeSpark("s1")} busy="9 GB VRAM in use" />);
+      const { container } = render(<ModelLauncher spark={makeSpark("s1")} busy="9 GB VRAM in use" busyMayBeModel />);
       await flush();
       expect(container.textContent).toContain("Something is loading");
+    });
+
+    it("says GPU is in use — not loading — when nothing served recently (Xe phantom busy)", async () => {
+      fetchLaunchers.mockResolvedValue(list({ a: "stopped", b: "stopped" }));
+      const { container } = render(<ModelLauncher spark={makeSpark("s1")} busy="8.1 GB VRAM in use · GPU 100%" />);
+      await flush();
+      expect(container.textContent).toContain("GPU is in use");
+      expect(container.textContent).not.toContain("Something is loading");
     });
 
     it("asks twice before Start anyway when little memory is free", async () => {
